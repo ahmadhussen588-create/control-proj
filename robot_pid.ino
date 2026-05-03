@@ -14,10 +14,13 @@
 #define IN4  10
 
 // ===================== CALIBRATED VALUES =====================
-const int BASE_SPEED      = 150;   // base PWM for forward driving (used by PID)
-const int LEFT_TRIM       = 13;    // LEFT_SPEED - RIGHT_SPEED bias from your calibration (163-130 ~ +13 boost on left)
-const int MIN_PWM         = 70;    // motors won't move below this
-const int MAX_PWM         = 230;   // cap so we never saturate fully and lose control
+// Your calibration: LEFT needs 163 PWM to match RIGHT at 130 (left motor has higher stall friction)
+const int LEFT_BASE       = 163;   // base PWM for LEFT motor straight-line cruise
+const int RIGHT_BASE      = 130;   // base PWM for RIGHT motor straight-line cruise
+const int LEFT_MIN_PWM    = 140;   // LEFT motor stalls below ~this value -- DO NOT lower
+const int RIGHT_MIN_PWM   = 110;   // RIGHT motor stalls below ~this value
+const int LEFT_MAX_PWM    = 240;
+const int RIGHT_MAX_PWM   = 220;
 const int TURN_PWM        = 255;
 const int TURN_RIGHT_MS   = 170;
 const int TURN_LEFT_MS    = 170;
@@ -82,9 +85,14 @@ void stopMotors() {
   analogWrite(ENA, 0); analogWrite(ENB, 0);
 }
 
-int clampPWM(int v) {
-  if (v < MIN_PWM) return MIN_PWM;
-  if (v > MAX_PWM) return MAX_PWM;
+int clampLeft(int v) {
+  if (v < LEFT_MIN_PWM)  return LEFT_MIN_PWM;
+  if (v > LEFT_MAX_PWM)  return LEFT_MAX_PWM;
+  return v;
+}
+int clampRight(int v) {
+  if (v < RIGHT_MIN_PWM) return RIGHT_MIN_PWM;
+  if (v > RIGHT_MAX_PWM) return RIGHT_MAX_PWM;
   return v;
 }
 
@@ -92,15 +100,15 @@ int clampPWM(int v) {
 void driveForwardPWM(int leftPWM, int rightPWM) {
   digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
-  analogWrite(ENA, clampPWM(leftPWM));
-  analogWrite(ENB, clampPWM(rightPWM));
+  analogWrite(ENA, clampLeft(leftPWM));
+  analogWrite(ENB, clampRight(rightPWM));
 }
 
 void backup() {
   digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
   digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
-  analogWrite(ENA, BASE_SPEED + LEFT_TRIM);
-  analogWrite(ENB, BASE_SPEED);
+  analogWrite(ENA, LEFT_BASE);
+  analogWrite(ENB, RIGHT_BASE);
   delay(BACKUP_MS);
   stopMotors();
   delay(300);
@@ -216,14 +224,14 @@ void loop() {
   if (l < SIDE_DANGER) {
     Serial.println("EMERGENCY VEER RIGHT");
     // pivot away from left wall briefly
-    driveForwardPWM(BASE_SPEED + 40, MIN_PWM);
+    driveForwardPWM(LEFT_MAX_PWM, RIGHT_MIN_PWM);
     delay(80);
     resetPID();
     return;
   }
   if (r < SIDE_DANGER) {
     Serial.println("EMERGENCY VEER LEFT");
-    driveForwardPWM(MIN_PWM, BASE_SPEED + 40);
+    driveForwardPWM(LEFT_MIN_PWM, RIGHT_MAX_PWM);
     delay(80);
     resetPID();
     return;
@@ -234,7 +242,7 @@ void loop() {
     Serial.println("RIGHT OPENING DETECTED");
     stopMotors();
     delay(100);
-    driveForwardPWM(BASE_SPEED + LEFT_TRIM, BASE_SPEED);
+    driveForwardPWM(LEFT_BASE, RIGHT_BASE);
     delay(150);
     stopMotors();
     delay(100);
@@ -246,21 +254,25 @@ void loop() {
   prevR = r;
 
   // ===== PRIORITY 4: PID WALL-CENTERING =====
-  // Speed scales down as front wall approaches (smooth braking, no collisions)
+  // Speed scales down as front wall approaches (smooth braking, no collisions).
+  // IMPORTANT: scale is applied to the *delta above stall* so the left motor
+  // never drops below LEFT_MIN_PWM and stalls.
   float speedScale = 1.0;
   if (f < FRONT_SLOW) {
     speedScale = (f - FRONT_STOP) / (FRONT_SLOW - FRONT_STOP);
-    if (speedScale < 0.35) speedScale = 0.35;
-    if (speedScale > 1.0)  speedScale = 1.0;
+    if (speedScale < 0.4) speedScale = 0.4;
+    if (speedScale > 1.0) speedScale = 1.0;
   }
 
-  int base = (int)(BASE_SPEED * speedScale);
+  int leftBase  = LEFT_MIN_PWM  + (int)((LEFT_BASE  - LEFT_MIN_PWM)  * speedScale);
+  int rightBase = RIGHT_MIN_PWM + (int)((RIGHT_BASE - RIGHT_MIN_PWM) * speedScale);
+
   float correction = computePIDCorrection(l, r);
 
   // Positive correction -> error positive (closer to right) -> steer left:
   //   slow LEFT motor, speed up RIGHT motor.
-  int leftPWM  = base + LEFT_TRIM - (int)correction;
-  int rightPWM = base              + (int)correction;
+  int leftPWM  = leftBase  - (int)correction;
+  int rightPWM = rightBase + (int)correction;
 
   driveForwardPWM(leftPWM, rightPWM);
 
